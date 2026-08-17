@@ -21,10 +21,11 @@ struct Camera{
     rot : (f64,f64,f64),
     normal: Normal,
     sun : (isize,isize,isize),
+    lights : Vec<(isize,isize,isize)>,
 }
 
 impl Camera{
-    pub const fn new(focal_point_distance : isize,sun : (isize,isize,isize)) -> Camera{
+    pub const fn new(focal_point_distance : isize,sun : (isize,isize,isize), lights : Vec<(isize,isize,isize)>) -> Camera{
         Camera{
             //focal_point: (0, 0, -focal_point_distance),
             focal_dist: focal_point_distance,
@@ -32,6 +33,7 @@ impl Camera{
             rot : (0f64, 0f64, 0f64),
             normal: Normal::new_from_equation((0,0,1), (0,0,focal_point_distance)),
             sun,
+            lights,
         }
     }
 
@@ -311,7 +313,7 @@ fn compute_triangle(triangles: &[Triangle3D], camera: &Camera, atomic_buffer: &m
 
     triangles.par_iter().for_each(|tri_3d| {
         let dt = -tri_3d.normal.dot_product_f64(camera.sun);
-        let mut light = 255;
+        let mut light = 220;
         if dt != 0f64{
             let sz = vec_size(camera.sun) * vec_size(tri_3d.normal.to_vec());
             let angle = dt/sz;

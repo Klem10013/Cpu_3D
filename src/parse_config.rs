@@ -6,8 +6,10 @@ use crate::{Triangle3D,Camera};
 #[derive(Deserialize)]
 struct Config{
     sun : (isize,isize,isize),
+    lights  : Vec<(isize,isize,isize)>,
     rectangles : Vec<Rectangle>,
     triangles : Vec<Triangle>,
+    stl_files : Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +43,22 @@ pub fn make_plane(pos : (isize,isize,isize), size : (isize,isize,isize), color :
     (face_1,face_2)
 }
 
+fn stl_parser(config: &Config) -> Vec<Triangle3D>{
+    let mut all_triangles = vec![];
+    for stl_file in config.stl_files.iter(){
+        let mut file = File::open(stl_file).unwrap();
+        let mut content = String::new();
+        file.read_to_string(&mut content).unwrap();
+        let lines = content.split("\n").collect::<Vec<&str>>();
+        let mut index = 1;
+        while index < lines.len(){
+            let line = lines[index];
+            index += 1
+        }
+    }
+    all_triangles
+}
+
 pub fn generate_config() -> (Camera,Vec<Triangle3D>){
     let mut file = File::open("config.json").unwrap();
     let mut content = String::new();
@@ -51,7 +69,7 @@ pub fn generate_config() -> (Camera,Vec<Triangle3D>){
     for triangle in &config.triangles {
         let triangle_3d = Triangle3D::new(triangle.x,triangle.y,triangle.z,triangle.color,triangle.only_face,triangle.inverse_normal);
         println!("nx : {} ny : {} nz : {}",triangle_3d.normal.nx,triangle_3d.normal.ny,triangle_3d.normal.nz);
-        //triangles.push(triangle_3d);
+        triangles.push(triangle_3d);
     }
     for rec in &config.rectangles {
         //top face
@@ -84,6 +102,7 @@ pub fn generate_config() -> (Camera,Vec<Triangle3D>){
         triangles.push(t1);
         triangles.push(t2);
     }
-    (Camera::new(350,config.sun), triangles)
+    triangles.append(&mut stl_parser(&config));
+    (Camera::new(350,config.sun, config.lights), triangles)
 }
 

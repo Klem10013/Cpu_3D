@@ -5,13 +5,63 @@ use minifb::{Key, MouseMode, Window, WindowOptions};
 use rayon::prelude::*;
 
 use std::time::Instant;
-use crate::parse_config::generate_config;
+use image::RgbaImage;
+use crate::parse_config::{generate_config, read_png_to_col};
 
-const WIDTH: usize = 1000;
+const WIDTH: usize = 1920;
 const WIDTH2I : isize = (WIDTH as isize) /2;
-const HEIGHT: usize = 500;
+const HEIGHT: usize = 1080;
 const HEIGHT2I : isize = (HEIGHT as isize) /2;
 const VIEW_DISTANCE : isize = 1000000;
+
+
+#[derive(Clone)]
+struct Color{
+    img : Option<RgbaImage>,
+    width : f64,
+    height : f64,
+    color : u32,
+}
+
+impl Color {
+    pub const fn new_from_u32(color : u32) ->  Color{
+        Color{
+            img: None,
+            width: 0.0,
+            height: 0.0,
+            color,
+        }
+    }
+
+    pub fn new_from_img( img : RgbaImage ) -> Color {
+        let width  = img.width() as f64;
+        let height = img.height() as f64;
+        Color{
+            img: Some(img),
+            width,
+            height,
+            color: 0,
+        }
+    }
+
+    pub fn get_barycentric(&self, x : f64, y : f64) -> u32{
+        if let Some(img) = &self.img {
+            let mut xi = (x * self.width) as u32;
+            let mut yi = (y * self.height) as u32;
+            if xi >= 100{
+                xi = 99;
+            }
+            if yi >= 100{
+                yi = 99;
+            }
+            let pix = img.get_pixel(xi, yi).0;
+            ((pix[0] as u32) << 16) + ((pix[1] as u32) << 8) + pix[2] as u32
+        }else{
+            self.color
+        }
+
+    }
+}
 
 #[derive(Debug)]
 struct Camera{
@@ -141,30 +191,34 @@ struct Triangle3D{
     p1 : (f64,f64,f64),
     p2 : (f64,f64,f64),
     p3 : (f64,f64,f64),
-    color : u32,
+    color : Color,
     inverse_normal : bool,
     normal : Normal,
     only_face : bool,
+    area : f64
 }
 
 impl Triangle3D{
-    pub fn new(p1 : (f64,f64,f64), p2 : (f64,f64,f64), p3 : (f64,f64,f64), color : u32, only_face : bool,inverse_normal : bool) -> Triangle3D{
+    pub fn new(p1 : (f64,f64,f64), p2 : (f64,f64,f64), p3 : (f64,f64,f64), color : Color, only_face : bool,inverse_normal : bool) -> Triangle3D{
         let mut normal = Normal::new(p1,p2,p3);
         if inverse_normal{
             normal.inverse();
         }
-        Triangle3D{p1 ,p2 ,p3 ,color , inverse_normal, normal, only_face }
+        let area = dot(normal.to_vec_f64(), cross(sub(p2, p1), sub(p3, p1)));
+        Triangle3D{p1 ,p2 ,p3 ,color , inverse_normal, normal, only_face, area}
     }
 
     pub fn new_stl(p1:(f64,f64,f64), p2: (f64,f64,f64), p3 : (f64,f64,f64),normal: Normal)-> Triangle3D{
+        let area = dot(normal.to_vec_f64(), cross(sub(p2, p1), sub(p3, p1)));
         Triangle3D{
             p1,
             p2,
             p3,
-            color: 0xFFFFFF,
+            color: Color::new_from_u32(0xFFFFFF),//read_png_to_col(),
             inverse_normal: false,
             normal,
             only_face: false,
+            area,
         }
     }
 
@@ -199,7 +253,7 @@ impl Triangle3D{
                     p2 = projection(p2_3d,&camera.normal);
                     p3 = projection(p3_3d,&camera.normal);
                     p1 = pr2;
-                    triangles.push(Triangle2D::new(pr2,pr3,p3,normal.clone(),self.only_face));
+                    triangles.push(Triangle2D::new(pr2,pr3,p3,p1_3d,p2_3d,p3_3d,normal.clone(),self.only_face));
                 }
             }else if p2_3d.2 < camera.focal_distf {
                 if p3_3d.2 < camera.focal_distf{
@@ -212,7 +266,7 @@ impl Triangle3D{
                     p1 = projection(p1_3d,&camera.normal);
                     p3 = projection(p3_3d,&camera.normal);
                     p2 = pr1;
-                    triangles.push(Triangle2D::new(pr1,pr3,p3,normal.clone(),self.only_face));
+                    triangles.push(Triangle2D::new(pr1,pr3,p3,p1_3d,p2_3d,p3_3d,normal.clone(),self.only_face));
                 }
             }else if p3_3d.2 < camera.focal_distf {
                 let pr1 = plane_clipping(p1_3d,p3_3d,&camera.normal);
@@ -220,13 +274,13 @@ impl Triangle3D{
                 p1 = projection(p1_3d,&camera.normal);
                 p2 = projection(p2_3d,&camera.normal);
                 p3 = pr1;
-                triangles.push(Triangle2D::new(pr1,pr2,p2,normal.clone(),self.only_face));
+                triangles.push(Triangle2D::new(pr1,pr2,p2,p1_3d,p2_3d,p3_3d,normal.clone(),self.only_face));
             }else{
                 p1 = projection(p1_3d,&camera.normal);
                 p2 = projection(p2_3d,&camera.normal);
                 p3 = projection(p3_3d,&camera.normal);
             }
-            triangles.push(Triangle2D::new(p1, p2, p3, normal,self.only_face));
+            triangles.push(Triangle2D::new(p1, p2, p3,p1_3d,p2_3d,p3_3d, normal,self.only_face));
             triangles
         }
     }
@@ -259,8 +313,11 @@ const fn projection(point : (f64,f64,f64), normal: &Normal) -> (f64,f64){
 #[derive(Debug)]
 struct Triangle2D{
     p1i : (f64,f64), // position
+    p1_3d : (f64,f64,f64), // position
     p2i : (f64,f64), // position
+    p2_3d : (f64,f64,f64), // position
     p3i : (f64,f64), // position
+    p3_3d : (f64,f64,f64), // position
     square_x : isize,
     square_y : isize,
     square_width : isize,
@@ -270,14 +327,17 @@ struct Triangle2D{
 }
 
 impl Triangle2D{
-    pub const fn new(p1i : (f64,f64), p2i : (f64,f64), p3i : (f64,f64), normal: Normal, only_face : bool) -> Triangle2D{
+    pub const fn new(p1i : (f64,f64), p2i : (f64,f64), p3i : (f64,f64), p1_3d : (f64,f64,f64), p2_3d: (f64,f64,f64), p3_3d: (f64,f64,f64), normal: Normal, only_face : bool) -> Triangle2D{
         let p1 = (p1i.0 as isize,p1i.1 as isize);
         let p2 = (p2i.0 as isize,p2i.1 as isize);
         let p3 = (p3i.0 as isize,p3i.1 as isize);
         Triangle2D{
             p1i,
+            p1_3d,
             p2i,
+            p2_3d,
             p3i,
+            p3_3d,
             square_x: min3(p1.0, p2.0, p3.0),
             square_y: min3(p1.1, p2.1, p3.1),
             square_width: max3(p1.0, p2.0, p3.0),
@@ -334,6 +394,15 @@ const fn intersection_xy(normal : &Normal, droite : (f64,f64,f64), point : (f64,
 }
 
 #[inline(always)]
+const fn intersection_xyz(normal : &Normal, droite : (f64,f64,f64), point : (f64,f64,f64)) -> (f64,f64,f64){
+    let t = intersection_t(normal, droite, point);
+    let x = point.0 + droite.0*t;
+    let y = point.1 + droite.1*t;
+    let z = point.2 + droite.2*t;
+    (x, y, z)
+}
+
+#[inline(always)]
 const fn encode_isize(z : isize, color : u32) -> isize{
     (color as isize) | z << 32
 }
@@ -356,9 +425,20 @@ fn vec_size(vec : (f64,f64,f64)) -> f64{
     ((vec.0 * vec.0) + (vec.1 * vec.1) + (vec.2 * vec.2)).sqrt()
 }
 
+fn sub(a: (f64,f64,f64), b: (f64,f64,f64)) -> (f64,f64,f64) {
+    (a.0-b.0, a.1-b.1, a.2-b.2)
+}
+fn dot(a: (f64,f64,f64), b: (f64,f64,f64)) -> f64 {
+    a.0*b.0 + a.1*b.1 + a.2*b.2
+}
+
+fn cross(a: (f64,f64,f64), b: (f64,f64,f64)) -> (f64,f64,f64) {
+    (a.1*b.2 - a.2*b.1, a.2*b.0 - a.0*b.2, a.0*b.1 - a.1*b.0)
+}
+
 #[inline(always)]
 fn compute_triangle(triangles: &[Triangle3D], camera: &Camera, atomic_buffer: &mut Vec<AtomicIsize>) {
-    atomic_buffer.par_iter().for_each(|p| {p.store(encode_isize(VIEW_DISTANCE,0x202030), Ordering::Relaxed)});
+    atomic_buffer.par_iter().for_each(|p| {p.store(encode_isize(VIEW_DISTANCE,0x101010), Ordering::Relaxed)});
 
     triangles.par_iter().for_each(|tri_3d| {
         let dt = -tri_3d.normal.dot_product_f64(camera.sun);
@@ -373,9 +453,9 @@ fn compute_triangle(triangles: &[Triangle3D], camera: &Camera, atomic_buffer: &m
         if light > 220{
             light = 220
         }
-        let r = ((tri_3d.color >> 16).saturating_sub(light)) << 16;
-        let g = (((tri_3d.color >> 8) & 0x00FF).saturating_sub(light)) << 8;
-        let b = (tri_3d.color & 0x0000FF).saturating_sub(light);
+        let r = ((tri_3d.color.color >> 16).saturating_sub(light)) << 16;
+        let g = (((tri_3d.color.color >> 8) & 0x00FF).saturating_sub(light)) << 8;
+        let b = (tri_3d.color.color & 0x0000FF).saturating_sub(light);
         let color = r+g+b;
 
         for tri in tri_3d.to_2d(camera).iter() {
@@ -395,10 +475,23 @@ fn compute_triangle(triangles: &[Triangle3D], camera: &Camera, atomic_buffer: &m
                     let d3 = sign((x, y), tri.p3i, tri.p1i);
                     if (d1.signum() == d2.signum()) && (d2.signum() == d3.signum()){
                         let idx = (y + HEIGHT2I) as usize * WIDTH + (x + WIDTH2I) as usize;
-                        let dot = tri.normal.dot_product((x,y,camera.focal_dist));
-                        if dot != 0 {
-                            let z = intersection_z(camera.focal_dist,dot,tri.normal.constant);
+                        let dot_p = tri.normal.dot_product((x,y,camera.focal_dist));
+                        if dot_p != 0 {
+                            let z = intersection_z(camera.focal_dist,dot_p,tri.normal.constant);
                             if z > camera.focal_dist {
+                                let p = intersection_xyz(&tri.normal,(x as f64,y as f64 ,camera.focal_distf),(x as f64, y as f64, camera.focal_distf));
+
+                                let area2 = dot(tri.normal.to_vec_f64(), cross(sub(tri.p2_3d, tri.p1_3d), sub(tri.p3_3d, tri.p1_3d)));
+
+                                let u = dot(tri.normal.to_vec_f64(), cross(sub(tri.p2_3d, p), sub(tri.p3_3d, p))) / area2;
+                                let v = dot(tri.normal.to_vec_f64(), cross(sub(tri.p3_3d, p), sub(tri.p1_3d, p))) / area2;
+                                let w = 1.0 - u - v;
+
+                                //let color = (((255f64*u) as u32) << 16) + (((255f64*v) as u32) << 8) + ((255f64*w) as u32);
+                                let x = u+w;
+                                let y= w;
+
+                                //let color = tri_3d.color.get_barycentric(x,y);
                                 atomic_buffer[idx].fetch_min(encode_isize(z, color), Ordering::Relaxed);
                             }
                         }

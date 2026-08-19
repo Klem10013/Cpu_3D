@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::ffi::c_double;
 use crate::{Color, Normal};
-use std::fs::File;
+use std::fs::{read, File};
 use std::io::{BufReader, Read};
 use serde::Deserialize;
 use crate::{Triangle3D,Camera};
@@ -54,16 +55,86 @@ fn stl_line_to_vec(line : &Vec<&str>) -> (f64,f64,f64){
     (x,y,z)
 }
 
+fn read_file<'a>(path : &String, content : &'a mut String) -> Vec<&'a str>{
+    let mut file = File::open(path).unwrap();
+    file.read_to_string(content).unwrap();
+    content.split("\n").collect::<Vec<&'a str>>()
+
+}
+
+fn obj_line_to_vec(line : &Vec<&str>) -> (f64,f64,f64){
+    let x = str::parse::<f64>(line[3]).unwrap() * 100f64;
+    let y = -str::parse::<f64>(line[2]).unwrap() * 100f64;
+    let z = -str::parse::<f64>(line[1]).unwrap() * 100f64;
+    (x,y,z)
+}
+
+fn obj_line_uv_to_vec(line : &Vec<&str>) -> (f64,f64){
+    let x = str::parse::<f64>(line[1]).unwrap();
+    let y = str::parse::<f64>(line[2]).unwrap();
+    (x,y)
+}
+
+fn obj_vertex_info(line : &Vec<&str>) -> (usize,usize,usize){
+    let vertex = str::parse::<usize>(line[0]).unwrap();
+    let uv = str::parse::<usize>(line[1]).unwrap();
+    let normal = str::parse::<usize>(line[2]).unwrap();
+    (vertex, uv, normal)
+}
+
+fn obj_mat_to_vec(line : &Vec<&str>) -> (f64,f64,f64) {
+    let v1 = str::parse::<f64>(line[1]).unwrap();
+    let v2 = str::parse::<f64>(line[2]).unwrap();
+    let v3 = str::parse::<f64>(line[3]).unwrap();
+    (v1, v2, v3)
+}
 fn obj_parser(config: &Config) -> Vec<Triangle3D>{
     let mut all_triangles = vec![];
+    let mut all_color : HashMap<String,Color> = HashMap::new();
     for obj_files in config.obj_files.iter(){
-        let mut file = File::open(obj_files).unwrap();
-        let mut content = String::new();
-        file.read_to_string(&mut content).unwrap();
-        let lines = content.split("\n").collect::<Vec<&str>>();
-        let mut index = 3;
-        while index < lines.len(){
-            
+        let mut all_vertex: Vec<(f64,f64,f64)>  = vec![(0f64,0f64,0f64)];
+        let mut all_uv : Vec<(f64,f64)>  = vec![(0f64,0f64)];
+        //Read material file
+        let mut mat_name : String = "".to_string();
+        for line in read_file(&(obj_files.clone() + ".mtl"), &mut String::new()).iter(){
+            let line_split = line.split(" ").collect::<Vec<&str>>();
+            if line_split.len() != 0{
+                if line_split[0] == "newmtl"{
+                    mat_name = line_split[1].to_string();
+                }else if line_split[0] == "Kd"{
+                    let (r,g,b) = obj_line_to_vec(&line_split);
+                    let color = (((255f64*r) as u32) << 16) + (((255f64*g) as u32) << 8) + ((255f64*b) as u32);
+                    all_color.insert(mat_name.clone(),Color::new_from_u32(color));
+                }else if line_split[0] == "map_Kd"{
+                    all_color.insert(mat_name.clone(),read_png_to_col(&line_split[1].to_string()));
+                }
+            }
+        }
+        //Read Object file
+        let white= Color::new_from_u32(0xFFFFFF);
+        let mut color = white.clone();
+        for line in read_file(&(obj_files.clone() + ".obj"),&mut  String::new()).iter(){
+            let line_split = line.split(" ").collect::<Vec<&str>>();
+            if line_split.len() != 0{
+                if line_split[0] == "o"{
+                    color = white.clone();
+                }else if line_split[0] == "usemtl"{
+                    color = all_color[line_split[1]].clone();
+                } else if line_split[0] == "v"{
+                    all_vertex.push(obj_line_to_vec(&line_split));
+                }else if line_split[0] == "vt"{
+                    all_uv.push(obj_line_uv_to_vec(&line_split));
+                }else if line_split[0] == "f"{
+                    for i in 3..line_split.len() {
+                        let (vert1, uv1, _) = obj_vertex_info(&line_split[1].split("/").collect::<Vec<&str>>());
+                        let (vert2, uv2, _) = obj_vertex_info(&line_split[i-1].split("/").collect::<Vec<&str>>());
+                        let (vert3, uv3, _) = obj_vertex_info(&line_split[i].split("/").collect::<Vec<&str>>());
+                        all_triangles.push(Triangle3D::new_obj(
+                            all_vertex[vert1], all_vertex[vert2], all_vertex[vert3], all_uv[uv1], all_uv[uv2], all_uv[uv3], color.clone()
+                        ));
+                    }
+                }
+            }
         }
     }
     all_triangles
@@ -84,7 +155,7 @@ fn stl_parser(config: &Config) -> Vec<Triangle3D>{
             let p2 = stl_line_to_vec(&lines[index+3].split_whitespace().collect::<Vec<&str>>());
             let p3 = stl_line_to_vec(&lines[index+4].split_whitespace().collect::<Vec<&str>>());
             let normal = Normal::new_from_equation_f64(nrm,p1);
-            all_triangles.push(Triangle3D::new_stl(p1,p2,p3,normal));
+            all_triangles.push(Triangle3D::new_stl(p1,p2,p3,normal,Color::new_from_u32(0xFFFFFF)));
 
             index += 7;
         }
@@ -136,11 +207,11 @@ pub fn generate_config() -> (Camera,Vec<Triangle3D>){
         triangles.push(t2);
     }
     triangles.append(&mut stl_parser(&config));
+    triangles.append(&mut obj_parser(&config));
     (Camera::new(350,config.sun, config.lights), triangles)
 }
 
-pub fn read_png_to_col() -> Color{
-    let path = "./textures/random.png";
+pub fn read_png_to_col(path : &String) -> Color{
     let img = image::open(path);
     let rgba = img.unwrap().to_rgba8();
     Color::new_from_img(rgba)

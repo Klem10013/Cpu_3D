@@ -6,11 +6,11 @@ use rayon::prelude::*;
 
 use std::time::Instant;
 use image::RgbaImage;
-use crate::parse_config::{generate_config, read_png_to_col};
+use crate::parse_config::generate_config;
 
-const WIDTH: usize = 1920;
+const WIDTH: usize = 1000;
 const WIDTH2I : isize = (WIDTH as isize) /2;
-const HEIGHT: usize = 1080;
+const HEIGHT: usize = 500;
 const HEIGHT2I : isize = (HEIGHT as isize) /2;
 const VIEW_DISTANCE : isize = 1000000;
 
@@ -20,7 +20,7 @@ struct Color{
     img : Option<RgbaImage>,
     width : f64,
     height : f64,
-    color : u32,
+    color : (u32,u32,u32),
 }
 
 impl Color {
@@ -29,7 +29,7 @@ impl Color {
             img: None,
             width: 0.0,
             height: 0.0,
-            color,
+            color : ((color >> 16),(((color & 0x00FF00) >> 8)),color & 0x0000FF),
         }
     }
 
@@ -40,22 +40,16 @@ impl Color {
             img: Some(img),
             width,
             height,
-            color: 0,
+            color: (0,0,0),
         }
     }
 
-    pub fn get_barycentric(&self, x : f64, y : f64) -> u32{
+    pub fn get_barycentric(&self, x : f64, y : f64) -> (u32,u32,u32){
         if let Some(img) = &self.img {
-            let mut xi = (x * self.width) as u32;
-            let mut yi = (y * self.height) as u32;
-            if xi >= 100{
-                xi = 99;
-            }
-            if yi >= 100{
-                yi = 99;
-            }
+            let xi = ((((x * self.width) % self.width) + self.width ) % self.width) as u32;
+            let yi = ((((y * self.height) % self.height) + self.height) % self.height) as u32;
             let pix = img.get_pixel(xi, yi).0;
-            ((pix[0] as u32) << 16) + ((pix[1] as u32) << 8) + pix[2] as u32
+            (pix[0] as u32, pix[1] as u32, pix[2] as u32)
         }else{
             self.color
         }
@@ -195,6 +189,9 @@ struct Triangle3D{
     inverse_normal : bool,
     normal : Normal,
     only_face : bool,
+    uv1 : (f64,f64),
+    uv2 : (f64,f64),
+    uv3 : (f64,f64),
     area : f64
 }
 
@@ -205,19 +202,41 @@ impl Triangle3D{
             normal.inverse();
         }
         let area = dot(normal.to_vec_f64(), cross(sub(p2, p1), sub(p3, p1)));
-        Triangle3D{p1 ,p2 ,p3 ,color , inverse_normal, normal, only_face, area}
+        Triangle3D{p1 ,p2 ,p3 ,color , inverse_normal, normal, only_face, uv1: (0.0, 0.0), uv2: (0.0, 1.0), uv3: (1.0, 1.0), area}
     }
 
-    pub fn new_stl(p1:(f64,f64,f64), p2: (f64,f64,f64), p3 : (f64,f64,f64),normal: Normal)-> Triangle3D{
+    pub fn new_stl(p1:(f64,f64,f64), p2: (f64,f64,f64), p3 : (f64,f64,f64),normal: Normal, color : Color)-> Triangle3D{
         let area = dot(normal.to_vec_f64(), cross(sub(p2, p1), sub(p3, p1)));
         Triangle3D{
             p1,
             p2,
             p3,
-            color: Color::new_from_u32(0xFFFFFF),//read_png_to_col(),
+            color,
             inverse_normal: false,
             normal,
             only_face: false,
+            uv1: (0.0, 0.0),
+            uv2: (0.0, 1.0),
+            uv3: (1.0, 1.0),
+            area,
+        }
+    }
+
+    pub fn new_obj(p1:(f64,f64,f64), p2: (f64,f64,f64), p3 : (f64,f64,f64), uv1 : (f64,f64), uv2 : (f64,f64), uv3 : (f64,f64), color : Color)-> Triangle3D{
+        let mut normal = Normal::new(p1,p2,p3);
+        normal.inverse();
+        let area = dot(normal.to_vec_f64(), cross(sub(p2, p1), sub(p3, p1)));
+        Triangle3D{
+            p1,
+            p2,
+            p3,
+            color,
+            inverse_normal: false,
+            normal,
+            only_face: false,
+            uv1,
+            uv2,
+            uv3,
             area,
         }
     }
@@ -318,6 +337,7 @@ struct Triangle2D{
     p2_3d : (f64,f64,f64), // position
     p3i : (f64,f64), // position
     p3_3d : (f64,f64,f64), // position
+    area : f64,
     square_x : isize,
     square_y : isize,
     square_width : isize,
@@ -331,6 +351,7 @@ impl Triangle2D{
         let p1 = (p1i.0 as isize,p1i.1 as isize);
         let p2 = (p2i.0 as isize,p2i.1 as isize);
         let p3 = (p3i.0 as isize,p3i.1 as isize);
+        let area = dot(normal.to_vec_f64(), cross(sub(p2_3d, p1_3d), sub(p3_3d, p1_3d)));
         Triangle2D{
             p1i,
             p1_3d,
@@ -338,6 +359,7 @@ impl Triangle2D{
             p2_3d,
             p3i,
             p3_3d,
+            area,
             square_x: min3(p1.0, p2.0, p3.0),
             square_y: min3(p1.1, p2.1, p3.1),
             square_width: max3(p1.0, p2.0, p3.0),
@@ -425,14 +447,18 @@ fn vec_size(vec : (f64,f64,f64)) -> f64{
     ((vec.0 * vec.0) + (vec.1 * vec.1) + (vec.2 * vec.2)).sqrt()
 }
 
-fn sub(a: (f64,f64,f64), b: (f64,f64,f64)) -> (f64,f64,f64) {
+#[inline(always)]
+const fn sub(a: (f64,f64,f64), b: (f64,f64,f64)) -> (f64,f64,f64) {
     (a.0-b.0, a.1-b.1, a.2-b.2)
 }
-fn dot(a: (f64,f64,f64), b: (f64,f64,f64)) -> f64 {
+
+#[inline(always)]
+const fn dot(a: (f64,f64,f64), b: (f64,f64,f64)) -> f64 {
     a.0*b.0 + a.1*b.1 + a.2*b.2
 }
 
-fn cross(a: (f64,f64,f64), b: (f64,f64,f64)) -> (f64,f64,f64) {
+#[inline(always)]
+const fn cross(a: (f64,f64,f64), b: (f64,f64,f64)) -> (f64,f64,f64) {
     (a.1*b.2 - a.2*b.1, a.2*b.0 - a.0*b.2, a.0*b.1 - a.1*b.0)
 }
 
@@ -453,11 +479,6 @@ fn compute_triangle(triangles: &[Triangle3D], camera: &Camera, atomic_buffer: &m
         if light > 220{
             light = 220
         }
-        let r = ((tri_3d.color.color >> 16).saturating_sub(light)) << 16;
-        let g = (((tri_3d.color.color >> 8) & 0x00FF).saturating_sub(light)) << 8;
-        let b = (tri_3d.color.color & 0x0000FF).saturating_sub(light);
-        let color = r+g+b;
-
         for tri in tri_3d.to_2d(camera).iter() {
             if tri.only_face && same_signe(tri.normal.nz,camera.normal.nz){
                 continue;
@@ -481,17 +502,21 @@ fn compute_triangle(triangles: &[Triangle3D], camera: &Camera, atomic_buffer: &m
                             if z > camera.focal_dist {
                                 let p = intersection_xyz(&tri.normal,(x as f64,y as f64 ,camera.focal_distf),(x as f64, y as f64, camera.focal_distf));
 
-                                let area2 = dot(tri.normal.to_vec_f64(), cross(sub(tri.p2_3d, tri.p1_3d), sub(tri.p3_3d, tri.p1_3d)));
 
-                                let u = dot(tri.normal.to_vec_f64(), cross(sub(tri.p2_3d, p), sub(tri.p3_3d, p))) / area2;
-                                let v = dot(tri.normal.to_vec_f64(), cross(sub(tri.p3_3d, p), sub(tri.p1_3d, p))) / area2;
+                                let u = dot(tri.normal.to_vec_f64(), cross(sub(tri.p2_3d, p), sub(tri.p3_3d, p))) / tri.area;
+                                let v = dot(tri.normal.to_vec_f64(), cross(sub(tri.p3_3d, p), sub(tri.p1_3d, p))) / tri.area;
                                 let w = 1.0 - u - v;
 
-                                //let color = (((255f64*u) as u32) << 16) + (((255f64*v) as u32) << 8) + ((255f64*w) as u32);
-                                let x = u+w;
-                                let y= w;
+                                let x = (tri_3d.uv1.0 * u)+(tri_3d.uv2.0 * v)+(tri_3d.uv3.0 * w);
+                                let y = (tri_3d.uv1.1 * u)+(tri_3d.uv2.1 * v)+(tri_3d.uv3.1 * w);
 
-                                //let color = tri_3d.color.get_barycentric(x,y);
+                                let (r,g,b) = tri_3d.color.get_barycentric(x,y);
+
+                                let r = (r.saturating_sub(light)) << 16;
+                                let g = (g.saturating_sub(light)) << 8;
+                                let b = b.saturating_sub(light);
+                                let color = r+g+b;
+
                                 atomic_buffer[idx].fetch_min(encode_isize(z, color), Ordering::Relaxed);
                             }
                         }
@@ -535,6 +560,9 @@ fn main() {
     let mut speed = 10;
     while window.is_open() && !window.is_key_down(Key::Escape) {
         speed = 10;
+        if window.get_mouse_pos(MouseMode::Discard).is_none() {
+            old_mouse_pos = (0f32,0f32);
+        }
         if let Some(pos) = window.get_mouse_pos(MouseMode::Discard) {
             if old_mouse_pos == (0f32,0f32) {
                 old_mouse_pos = pos;
